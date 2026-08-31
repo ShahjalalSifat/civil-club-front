@@ -444,119 +444,65 @@ export async function getArchivedEvents(count = 50): Promise<EventItem[]> {
   return events.slice(0, count);
 }
 
-// Helper detection functions for Committee & Member categories
-export function isExecutiveMember(doc: any): boolean {
-  if (!doc) return false;
-  const t = String(doc.type || '').toLowerCase();
-  const c = String(doc.category || '').toLowerCase();
-  const r = String(doc.role || '').toLowerCase();
-  const comm = String(doc.committee || doc.committeeType || '').toLowerCase();
-  const d = String(doc.designation || doc.position || '').toLowerCase();
+// Running Batch Configuration
+// Batches 21 and above are current running students (e.g. 21, 22, 23, 24, 25...).
+// Batches 20 and below (e.g. Batch 20, 19, 18, 17, 16, etc.) are graduated / ALUMNI as defined in backend.
+export const RUNNING_BATCH_MIN = 21;
 
-  if (
-    doc.isExecutive === true ||
-    doc.isLeadership === true ||
-    doc.isExecutiveCommittee === true ||
-    doc.isEC === true
-  ) {
-    return true;
-  }
-
-  if (
-    t.includes('exec') || t.includes('ec') || t.includes('committee') ||
-    c.includes('exec') || c.includes('ec') || c.includes('committee') ||
-    r.includes('exec') || r.includes('ec') || r.includes('committee') ||
-    comm.includes('exec') || comm.includes('ec') || comm.includes('committee')
-  ) {
-    return true;
-  }
-
-  // Executive Committee Designation Auto-Detection
-  const executiveKeywords = [
-    'president',
-    'vice president',
-    'vice-president',
-    'general secretary',
-    'joint secretary',
-    'joint general secretary',
-    'assistant general secretary',
-    'assistant secretary',
-    'treasurer',
-    'organizing secretary',
-    'joint organizing',
-    'office secretary',
-    'assistant office',
-    'press',
-    'media',
-    'publication',
-    'editorial',
-    'editor',
-    'it secretary',
-    'tech secretary',
-    'technology secretary',
-    'sports secretary',
-    'cultural secretary',
-    'research & development',
-    'event coordinator',
-    'student coordinator',
-    'executive member',
-    'ec member',
-    'lead organizer',
-    'convenor',
-    'co-convenor',
-  ];
-
-  for (const kw of executiveKeywords) {
-    if (d.includes(kw)) {
-      // Exclude if explicitly marked as alumni or advisor
-      if (t.includes('alumni') || c.includes('alumni') || t.includes('advisor') || c.includes('advisor') || d.includes('advisor') || d.includes('adviser')) {
-        return false;
-      }
-      return true;
+export function extractBatchNumber(doc: any): number | null {
+  if (!doc) return null;
+  const rawBatch = doc.batch !== undefined && doc.batch !== null ? doc.batch : (doc.batchNo || '');
+  if (typeof rawBatch === 'number' && rawBatch > 0) return rawBatch;
+  if (typeof rawBatch === 'string') {
+    const match = rawBatch.match(/\b(\d{1,2})\b/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (!isNaN(num)) return num;
     }
   }
 
-  return false;
+  // Also check student ID (e.g. 1602001 -> 16)
+  const studentId = String(doc.studentId || doc.sid || '');
+  if (studentId.length >= 2) {
+    const firstTwo = parseInt(studentId.substring(0, 2), 10);
+    if (!isNaN(firstTwo) && firstTwo > 0 && firstTwo < 50) {
+      return firstTwo;
+    }
+  }
+
+  // Also check session (e.g. 2016-17 -> 16)
+  const session = String(doc.session || '');
+  const sessionMatch = session.match(/20(\d{2})/);
+  if (sessionMatch) {
+    const num = parseInt(sessionMatch[1], 10);
+    if (!isNaN(num)) return num;
+  }
+
+  return null;
 }
 
-export function isAlumniMember(doc: any): boolean {
-  if (!doc) return false;
-  const t = String(doc.type || '').toLowerCase();
-  const c = String(doc.category || '').toLowerCase();
-  const r = String(doc.role || '').toLowerCase();
-  const d = String(doc.designation || '').toLowerCase();
-  const s = String(doc.status || '').toLowerCase();
-
-  return (
-    doc.isAlumni === true ||
-    t.includes('alumni') ||
-    c.includes('alumni') ||
-    r.includes('alumni') ||
-    s.includes('alumni') ||
-    s.includes('graduated') ||
-    d.includes('alumni') ||
-    d.includes('ex-') ||
-    d.includes('former')
-  );
-}
-
+// Helper detection functions for Committee & Member categories
 export function isAdvisoryMember(doc: any): boolean {
   if (!doc) return false;
   const t = String(doc.type || '').toLowerCase();
   const c = String(doc.category || '').toLowerCase();
   const r = String(doc.role || '').toLowerCase();
-  const d = String(doc.designation || '').toLowerCase();
+  const d = String(doc.designation || doc.position || '').toLowerCase();
 
   return (
     doc.isAdvisor === true ||
     doc.isAdviser === true ||
+    doc.isFaculty === true ||
     t.includes('advis') ||
     c.includes('advis') ||
     r.includes('advis') ||
     d.includes('advisor') ||
     d.includes('adviser') ||
     d.includes('mentor') ||
-    d.includes('faculty')
+    d.includes('faculty') ||
+    d.includes('teacher') ||
+    d.includes('professor') ||
+    d.includes('lecturer')
   );
 }
 
@@ -565,7 +511,7 @@ export function isTaskforceMember(doc: any): boolean {
   const t = String(doc.type || '').toLowerCase();
   const c = String(doc.category || '').toLowerCase();
   const r = String(doc.role || '').toLowerCase();
-  const d = String(doc.designation || '').toLowerCase();
+  const d = String(doc.designation || doc.position || '').toLowerCase();
 
   return (
     doc.isTaskforce === true ||
@@ -577,10 +523,166 @@ export function isTaskforceMember(doc: any): boolean {
   );
 }
 
+export function isAlumniMember(doc: any): boolean {
+  if (!doc) return false;
+
+  // Advisory members are not student alumni in this context
+  if (isAdvisoryMember(doc)) return false;
+
+  // Check Batch Number: Batches <= 19 (e.g. Batch 16, 17, 18) are graduated Alumni
+  const batchNum = extractBatchNumber(doc);
+  if (batchNum !== null && batchNum < RUNNING_BATCH_MIN) {
+    return true;
+  }
+
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const d = String(doc.designation || doc.position || '').toLowerCase();
+  const s = String(doc.status || '').toLowerCase();
+
+  // Flag checks
+  if (
+    doc.isAlumni === true ||
+    doc.isGraduated === true ||
+    doc.isPassedOut === true ||
+    doc.isCurrentStudent === false ||
+    doc.isRunningStudent === false ||
+    doc.isPast === true ||
+    doc.isPrevious === true
+  ) {
+    return true;
+  }
+
+  // String keyword checks
+  return (
+    t.includes('alumni') ||
+    c.includes('alumni') ||
+    r.includes('alumni') ||
+    s.includes('alumni') ||
+    s.includes('graduat') ||
+    s.includes('passed') ||
+    s.includes('ex-') ||
+    s.includes('former') ||
+    s.includes('inactive') ||
+    d.includes('alumni') ||
+    d.includes('ex-') ||
+    d.includes('former') ||
+    d.includes('past') ||
+    d.includes('graduated')
+  );
+}
+
+export function isExecutiveMember(doc: any): boolean {
+  if (!doc) return false;
+
+  // 1. Advisors & Mentors are strictly NOT executive student committee
+  if (isAdvisoryMember(doc)) return false;
+
+  // 2. Non-running / graduated / former / alumni members (e.g. Batch 16 or < 20) are strictly NOT current executive committee
+  if (isAlumniMember(doc)) return false;
+
+  // 3. Check Batch: Running student batches must be >= RUNNING_BATCH_MIN (Batch 20+)
+  const batchNum = extractBatchNumber(doc);
+  if (batchNum !== null && batchNum < RUNNING_BATCH_MIN) {
+    return false;
+  }
+
+  // 4. Taskforce members have their own category
+  if (isTaskforceMember(doc)) return false;
+
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const comm = String(doc.committee || doc.committeeType || '').toLowerCase();
+  const d = String(doc.designation || doc.position || '').toLowerCase();
+  const s = String(doc.status || '').toLowerCase();
+
+  // Check for explicit inactive status
+  if (
+    s.includes('inactive') ||
+    s.includes('alumni') ||
+    s.includes('graduat') ||
+    doc.isExecutive === false ||
+    doc.isCurrentCommittee === false
+  ) {
+    return false;
+  }
+
+  if (
+    doc.isExecutive === true ||
+    doc.isLeadership === true ||
+    doc.isExecutiveCommittee === true ||
+    doc.isEC === true
+  ) {
+    return true;
+  }
+
+  if (
+    t.includes('exec') || t.includes('ec') ||
+    c.includes('exec') || c.includes('ec') ||
+    r.includes('exec') || r.includes('ec') ||
+    comm.includes('exec') || comm.includes('ec')
+  ) {
+    return true;
+  }
+
+  // Executive Committee Designation Auto-Detection for RUNNING students
+  const executiveKeywords = [
+    'president',
+    'vice president',
+    'vice-president',
+    'general secretary',
+    'joint secretary',
+    'joint general secretary',
+    'assistant general secretary',
+    'assistant secretary',
+    'treasurer',
+    'finance',
+    'organizing secretary',
+    'joint organizing',
+    'assistant organizing',
+    'office secretary',
+    'assistant office',
+    'press',
+    'media',
+    'publication',
+    'editorial',
+    'editor',
+    'it secretary',
+    'tech secretary',
+    'technology secretary',
+    'webmaster',
+    'sports secretary',
+    'sport secretary',
+    'sport secratory',
+    'sports secratory',
+    'cultural secretary',
+    'research & development',
+    'research secretary',
+    'event coordinator',
+    'student coordinator',
+    'executive member',
+    'ec member',
+    'lead organizer',
+    'convenor',
+    'co-convenor',
+  ];
+
+  for (const kw of executiveKeywords) {
+    if (d.includes(kw)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function normalizeLeadershipMember(docId: string, raw: any, fallbackCategory = 'executive') {
   const data = raw || {};
   const name = data.name || data.fullName || data.memberName || data.title || 'Club Leader';
-  const designation = data.designation || data.role || data.position || (isExecutiveMember(data) ? 'Executive Member' : 'Member');
+  const isExec = isExecutiveMember(data);
+  const designation = data.designation || data.role || data.position || (isExec ? 'Executive Member' : 'Member');
   const batch = data.batch !== undefined && data.batch !== null ? data.batch : (data.batchNo || data.session || '');
   const photoUrl = data.photoUrl || data.photo || data.imageUrl || data.image || data.avatar || '';
   const email = data.email || data.emailAddress || '';
@@ -595,7 +697,7 @@ export function normalizeLeadershipMember(docId: string, raw: any, fallbackCateg
   if (isAdvisoryMember(data)) computedType = 'advisory';
   else if (isAlumniMember(data)) computedType = 'alumni';
   else if (isTaskforceMember(data)) computedType = 'taskforce';
-  else if (isExecutiveMember(data)) computedType = 'executive';
+  else if (isExec) computedType = 'executive';
   else if (data.type || data.category) computedType = String(data.type || data.category).toLowerCase();
 
   return {
@@ -680,19 +782,19 @@ export async function getAllLeadershipMembers(category?: string) {
   const targetCategory = category.toLowerCase().trim();
 
   if (targetCategory === 'executive' || targetCategory === 'executive_committee') {
-    return allUnique.filter((m) => isExecutiveMember(m) || m.type === 'executive' || m.category === 'executive');
+    return allUnique.filter((m) => isExecutiveMember(m) && !isAlumniMember(m) && !isAdvisoryMember(m));
   }
 
   if (targetCategory === 'alumni') {
-    return allUnique.filter((m) => isAlumniMember(m) || m.type === 'alumni' || m.category === 'alumni');
+    return allUnique.filter((m) => isAlumniMember(m) && !isAdvisoryMember(m));
   }
 
   if (targetCategory === 'advisory' || targetCategory === 'advisor') {
-    return allUnique.filter((m) => isAdvisoryMember(m) || m.type === 'advisory' || m.category === 'advisory');
+    return allUnique.filter((m) => isAdvisoryMember(m));
   }
 
   if (targetCategory === 'taskforce') {
-    return allUnique.filter((m) => isTaskforceMember(m) || m.type === 'taskforce' || m.category === 'taskforce');
+    return allUnique.filter((m) => isTaskforceMember(m));
   }
 
   return allUnique.filter((m) => 
