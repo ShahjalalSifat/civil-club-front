@@ -304,6 +304,8 @@ export function FaqAiBubble() {
   const [hasIntroduced, setHasIntroduced] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const introTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSentTime = useRef<number>(0);
+  const responseCache = useRef<Record<string, string>>({});
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -339,12 +341,12 @@ export function FaqAiBubble() {
     setOpen(true);
   }
 
-  async function sendMessage(textToSend?: string) {
+  const sendMessage = async (textToSend?: string) => {
     const text = (textToSend !== undefined ? textToSend : input).trim();
     if (!text || loading) return;
 
     // Check if we have an instant pre-cached response for suggested/common queries
-    const directAns = INSTANT_ANSWERS[text];
+    const directAns = INSTANT_ANSWERS[text] || responseCache.current[text.toLowerCase()];
 
     setMessages((prev) => [...prev, { role: 'user', text }]);
     setInput('');
@@ -370,6 +372,9 @@ export function FaqAiBubble() {
 
       const data = await res.json().catch(() => ({}));
       const reply = data.reply || data.error || 'দুঃখিত, উত্তর দিতে পারলাম না।';
+      if (data.reply) {
+        responseCache.current[text.toLowerCase()] = data.reply;
+      }
       setMessages((prev) => [...prev, { role: 'assistant', text: reply }]);
     } catch {
       setMessages((prev) => [
@@ -379,7 +384,7 @@ export function FaqAiBubble() {
     } finally {
       setLoading(false);
     }
-  }
+  };
 
   const handleClearChat = () => {
     setMessages([{ role: 'assistant', text: GREETING_TEXT }]);

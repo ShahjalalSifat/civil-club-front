@@ -444,18 +444,261 @@ export async function getArchivedEvents(count = 50): Promise<EventItem[]> {
   return events.slice(0, count);
 }
 
+// Helper detection functions for Committee & Member categories
+export function isExecutiveMember(doc: any): boolean {
+  if (!doc) return false;
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const comm = String(doc.committee || doc.committeeType || '').toLowerCase();
+  const d = String(doc.designation || doc.position || '').toLowerCase();
+
+  if (
+    doc.isExecutive === true ||
+    doc.isLeadership === true ||
+    doc.isExecutiveCommittee === true ||
+    doc.isEC === true
+  ) {
+    return true;
+  }
+
+  if (
+    t.includes('exec') || t.includes('ec') || t.includes('committee') ||
+    c.includes('exec') || c.includes('ec') || c.includes('committee') ||
+    r.includes('exec') || r.includes('ec') || r.includes('committee') ||
+    comm.includes('exec') || comm.includes('ec') || comm.includes('committee')
+  ) {
+    return true;
+  }
+
+  // Executive Committee Designation Auto-Detection
+  const executiveKeywords = [
+    'president',
+    'vice president',
+    'vice-president',
+    'general secretary',
+    'joint secretary',
+    'joint general secretary',
+    'assistant general secretary',
+    'assistant secretary',
+    'treasurer',
+    'organizing secretary',
+    'joint organizing',
+    'office secretary',
+    'assistant office',
+    'press',
+    'media',
+    'publication',
+    'editorial',
+    'editor',
+    'it secretary',
+    'tech secretary',
+    'technology secretary',
+    'sports secretary',
+    'cultural secretary',
+    'research & development',
+    'event coordinator',
+    'student coordinator',
+    'executive member',
+    'ec member',
+    'lead organizer',
+    'convenor',
+    'co-convenor',
+  ];
+
+  for (const kw of executiveKeywords) {
+    if (d.includes(kw)) {
+      // Exclude if explicitly marked as alumni or advisor
+      if (t.includes('alumni') || c.includes('alumni') || t.includes('advisor') || c.includes('advisor') || d.includes('advisor') || d.includes('adviser')) {
+        return false;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isAlumniMember(doc: any): boolean {
+  if (!doc) return false;
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const d = String(doc.designation || '').toLowerCase();
+  const s = String(doc.status || '').toLowerCase();
+
+  return (
+    doc.isAlumni === true ||
+    t.includes('alumni') ||
+    c.includes('alumni') ||
+    r.includes('alumni') ||
+    s.includes('alumni') ||
+    s.includes('graduated') ||
+    d.includes('alumni') ||
+    d.includes('ex-') ||
+    d.includes('former')
+  );
+}
+
+export function isAdvisoryMember(doc: any): boolean {
+  if (!doc) return false;
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const d = String(doc.designation || '').toLowerCase();
+
+  return (
+    doc.isAdvisor === true ||
+    doc.isAdviser === true ||
+    t.includes('advis') ||
+    c.includes('advis') ||
+    r.includes('advis') ||
+    d.includes('advisor') ||
+    d.includes('adviser') ||
+    d.includes('mentor') ||
+    d.includes('faculty')
+  );
+}
+
+export function isTaskforceMember(doc: any): boolean {
+  if (!doc) return false;
+  const t = String(doc.type || '').toLowerCase();
+  const c = String(doc.category || '').toLowerCase();
+  const r = String(doc.role || '').toLowerCase();
+  const d = String(doc.designation || '').toLowerCase();
+
+  return (
+    doc.isTaskforce === true ||
+    t.includes('task') ||
+    c.includes('task') ||
+    r.includes('task') ||
+    d.includes('taskforce') ||
+    d.includes('special team')
+  );
+}
+
+export function normalizeLeadershipMember(docId: string, raw: any, fallbackCategory = 'executive') {
+  const data = raw || {};
+  const name = data.name || data.fullName || data.memberName || data.title || 'Club Leader';
+  const designation = data.designation || data.role || data.position || (isExecutiveMember(data) ? 'Executive Member' : 'Member');
+  const batch = data.batch !== undefined && data.batch !== null ? data.batch : (data.batchNo || data.session || '');
+  const photoUrl = data.photoUrl || data.photo || data.imageUrl || data.image || data.avatar || '';
+  const email = data.email || data.emailAddress || '';
+  const phone = data.phone || data.contact || data.contactNo || '';
+  const department = data.department || data.dept || 'Civil Engineering';
+  const facebookUrl = data.facebookUrl || data.facebook || data.fb || '';
+  const linkedinUrl = data.linkedinUrl || data.linkedin || '';
+  const studentId = data.studentId || data.sid || '';
+  const membershipId = data.membershipId || data.memberId || docId;
+
+  let computedType = fallbackCategory;
+  if (isAdvisoryMember(data)) computedType = 'advisory';
+  else if (isAlumniMember(data)) computedType = 'alumni';
+  else if (isTaskforceMember(data)) computedType = 'taskforce';
+  else if (isExecutiveMember(data)) computedType = 'executive';
+  else if (data.type || data.category) computedType = String(data.type || data.category).toLowerCase();
+
+  return {
+    id: docId,
+    ...data,
+    name,
+    fullName: name,
+    designation,
+    batch,
+    photoUrl,
+    email,
+    phone,
+    department,
+    facebookUrl,
+    linkedinUrl,
+    studentId,
+    membershipId,
+    type: computedType,
+    category: computedType,
+  };
+}
+
 export async function getAllLeadershipMembers(category?: string) {
   if (!db) return [];
-  let q;
-  if (category) {
-    const snap = await getDocs(query(collection(db, "leadership_members"), orderBy("createdAt", "desc")));
-    let docs = snap.docs.map(doc => ({ id: doc.id, ...doc.data() as any }));
-    return docs.filter(d => d.type && d.type.toLowerCase() === category.toLowerCase());
-  } else {
-    q = query(collection(db, "leadership_members"), orderBy("createdAt", "desc"));
-    const snap = await getDocs(q);
-    return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  
+  const collectionsToTry = [
+    'leadership_members',
+    'leadership',
+    'executives',
+    'executive_members',
+    'committee_members',
+    'committee',
+    'advisors',
+    'alumni',
+    'taskforce',
+    'memberships',
+    'members'
+  ];
+
+  const memberMap = new Map<string, any>();
+
+  for (const colName of collectionsToTry) {
+    try {
+      let snap;
+      try {
+        snap = await getDocs(query(collection(db, colName), orderBy('createdAt', 'desc')));
+      } catch {
+        snap = await getDocs(collection(db, colName));
+      }
+
+      if (snap && !snap.empty) {
+        snap.docs.forEach((doc) => {
+          const raw = doc.data() as any;
+          // For general 'memberships' or 'members' collections, only include if they have a leadership/executive indicator
+          if (colName === 'memberships' || colName === 'members') {
+            const isLead = isExecutiveMember(raw) || isAdvisoryMember(raw) || isAlumniMember(raw) || isTaskforceMember(raw) || raw.type || raw.category;
+            if (!isLead) return;
+          }
+
+          const normalized = normalizeLeadershipMember(doc.id, raw, colName.includes('alumni') ? 'alumni' : colName.includes('advis') ? 'advisory' : colName.includes('task') ? 'taskforce' : 'executive');
+          
+          // Deduplicate by id or unique name+batch
+          const dedupeKey = `${normalized.name.toLowerCase().trim()}_${String(normalized.batch).toLowerCase().trim()}`;
+          if (!memberMap.has(doc.id) && !memberMap.has(dedupeKey)) {
+            memberMap.set(doc.id, normalized);
+            memberMap.set(dedupeKey, normalized);
+          }
+        });
+      }
+    } catch (e) {
+      console.warn(`Querying leadership collection ${colName} note:`, e);
+    }
   }
+
+  // Get unique list of members
+  const allUnique = Array.from(new Set(memberMap.values()));
+
+  if (!category) {
+    return allUnique;
+  }
+
+  const targetCategory = category.toLowerCase().trim();
+
+  if (targetCategory === 'executive' || targetCategory === 'executive_committee') {
+    return allUnique.filter((m) => isExecutiveMember(m) || m.type === 'executive' || m.category === 'executive');
+  }
+
+  if (targetCategory === 'alumni') {
+    return allUnique.filter((m) => isAlumniMember(m) || m.type === 'alumni' || m.category === 'alumni');
+  }
+
+  if (targetCategory === 'advisory' || targetCategory === 'advisor') {
+    return allUnique.filter((m) => isAdvisoryMember(m) || m.type === 'advisory' || m.category === 'advisory');
+  }
+
+  if (targetCategory === 'taskforce') {
+    return allUnique.filter((m) => isTaskforceMember(m) || m.type === 'taskforce' || m.category === 'taskforce');
+  }
+
+  return allUnique.filter((m) => 
+    (m.type && m.type.toLowerCase().includes(targetCategory)) ||
+    (m.category && m.category.toLowerCase().includes(targetCategory))
+  );
 }
 
 export async function getNotices() {
@@ -585,9 +828,61 @@ export interface MembershipRecord {
 export async function getMembership(queryStr: string): Promise<MembershipRecord | null> {
   if (!db || !queryStr) return null;
   const cleanQuery = queryStr.trim();
+  const lowerQuery = cleanQuery.toLowerCase();
 
-  const collectionsToTry = ["memberships", "members", "leadership_members"];
+  const collectionsToTry = [
+    "memberships",
+    "members",
+    "leadership_members",
+    "executives",
+    "executive_members",
+    "committee_members",
+    "leadership",
+    "alumni",
+    "advisors"
+  ];
 
+  // Helper to format a matched doc into MembershipRecord
+  const formatRecord = (docId: string, raw: any): MembershipRecord => {
+    const isExec = isExecutiveMember(raw);
+    const fullName = raw.fullName || raw.name || raw.memberName || 'Club Member';
+    const photoUrl = raw.photoUrl || raw.photo || raw.imageUrl || raw.avatar || `https://picsum.photos/seed/${encodeURIComponent(docId)}/400/400`;
+    const batch = raw.batch !== undefined && raw.batch !== null ? raw.batch : (raw.batchNo || '');
+    const department = raw.department || raw.dept || 'Civil Engineering';
+    const facebookUrl = raw.facebookUrl || raw.facebook || '';
+    const linkedinUrl = raw.linkedinUrl || raw.linkedin || '';
+    const email = raw.emailAddress || raw.email || '';
+    const phone = raw.phone || raw.contact || raw.contactNo || '';
+    const membershipId = raw.membershipId || raw.memberId || raw.id || (docId.startsWith('MEM') || docId.startsWith('CEC') ? docId : `CEC-${docId.substring(0, 8).toUpperCase()}`);
+    const designation = raw.designation || raw.role || raw.position || (isExec ? 'Executive Committee Member' : 'Member');
+    const role = raw.role || designation || (isExec ? 'Executive Committee' : 'General Member');
+    const status = raw.status || (isExec ? 'Active (Executive Committee)' : 'Active Member');
+    const bloodGroup = raw.bloodGroup || raw.blood || '';
+    const issueDate = raw.issueDate || raw.joinedDate || (raw.createdAt ? new Date(raw.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Active Member');
+
+    return {
+      id: docId,
+      ...raw,
+      membershipId,
+      fullName,
+      name: fullName,
+      designation,
+      role,
+      batch,
+      department,
+      photoUrl,
+      facebookUrl,
+      linkedinUrl,
+      email,
+      phone,
+      status,
+      bloodGroup,
+      issueDate,
+      isExecutive: isExec,
+    };
+  };
+
+  // Phase 1: Fast exact indexed queries
   for (const colName of collectionsToTry) {
     try {
       // 1. By membershipId
@@ -610,49 +905,70 @@ export async function getMembership(queryStr: string): Promise<MembershipRecord 
         snap = await getDocs(q);
       }
 
-      // 4. By document ID
+      // 4. By name / fullName
       if (snap.empty) {
-        q = query(collection(db, colName), where("__name__", "==", cleanQuery));
+        q = query(collection(db, colName), where("name", "==", cleanQuery));
+        snap = await getDocs(q);
+      }
+      if (snap.empty) {
+        q = query(collection(db, colName), where("fullName", "==", cleanQuery));
         snap = await getDocs(q);
       }
 
-      if (!snap.empty) {
-        const raw = snap.docs[0].data() as any;
-        const fullName = raw.fullName || raw.name || raw.memberName || 'Club Member';
-        const photoUrl = raw.photoUrl || raw.photo || raw.imageUrl || raw.avatar || `https://picsum.photos/seed/${encodeURIComponent(cleanQuery)}/400/400`;
-        const batch = raw.batch !== undefined && raw.batch !== null ? raw.batch : (raw.batchNo || '');
-        const department = raw.department || raw.dept || 'Civil Engineering';
-        const facebookUrl = raw.facebookUrl || raw.facebook || '';
-        const linkedinUrl = raw.linkedinUrl || raw.linkedin || '';
-        const email = raw.emailAddress || raw.email || '';
-        const phone = raw.phone || raw.contact || raw.contactNo || '';
-        const membershipId = raw.membershipId || raw.id || snap.docs[0].id;
-        const status = raw.status || 'Active';
-        const bloodGroup = raw.bloodGroup || raw.blood || '';
-        const issueDate = raw.issueDate || raw.joinedDate || (raw.createdAt ? new Date(raw.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Active Member');
+      // 5. By document ID
+      if (snap.empty) {
+        try {
+          const directDoc = await getDoc(doc(db, colName, cleanQuery));
+          if (directDoc.exists()) {
+            return formatRecord(directDoc.id, directDoc.data());
+          }
+        } catch {
+          // ignore
+        }
+      }
 
-        return {
-          id: snap.docs[0].id,
-          ...raw,
-          membershipId,
-          fullName,
-          name: fullName,
-          batch,
-          department,
-          photoUrl,
-          facebookUrl,
-          linkedinUrl,
-          email,
-          phone,
-          status,
-          bloodGroup,
-          issueDate,
-        };
+      if (!snap.empty) {
+        return formatRecord(snap.docs[0].id, snap.docs[0].data());
       }
     } catch (err) {
-      console.error(`Error querying ${colName} for membership:`, err);
+      console.warn(`Direct query on ${colName} note:`, err);
     }
   }
+
+  // Phase 2: In-Memory Case-Insensitive and Substring Deep Search (guarantees finding executive & general members)
+  for (const colName of collectionsToTry) {
+    try {
+      const snap = await getDocs(collection(db, colName));
+      if (!snap.empty) {
+        for (const d of snap.docs) {
+          const raw = d.data() as any;
+          const mId = String(raw.membershipId || raw.memberId || d.id || '').toLowerCase();
+          const sId = String(raw.studentId || raw.sid || '').toLowerCase();
+          const em = String(raw.email || raw.emailAddress || '').toLowerCase();
+          const nm = String(raw.name || raw.fullName || raw.memberName || '').toLowerCase();
+          const ph = String(raw.phone || raw.contact || raw.contactNo || '').replace(/\D/g, '');
+          const cleanPhone = cleanQuery.replace(/\D/g, '');
+
+          if (
+            mId === lowerQuery ||
+            mId.includes(lowerQuery) ||
+            sId === lowerQuery ||
+            sId.includes(lowerQuery) ||
+            em === lowerQuery ||
+            nm === lowerQuery ||
+            nm.includes(lowerQuery) ||
+            (cleanPhone && ph && ph.includes(cleanPhone)) ||
+            d.id.toLowerCase() === lowerQuery
+          ) {
+            return formatRecord(d.id, raw);
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`Scan on ${colName} note:`, e);
+    }
+  }
+
   return null;
 }
 

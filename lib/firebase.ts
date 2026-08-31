@@ -15,7 +15,14 @@ let app: FirebaseApp | undefined;
 let db: Firestore | undefined;
 let auth: Auth | undefined;
 
-if (firebaseConfig.apiKey && firebaseConfig.projectId) {
+const hasValidConfig = Boolean(
+  firebaseConfig.apiKey &&
+  firebaseConfig.projectId &&
+  firebaseConfig.apiKey !== 'undefined' &&
+  firebaseConfig.projectId !== 'undefined'
+);
+
+if (hasValidConfig) {
   try {
     app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
     try {
@@ -28,10 +35,13 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId) {
     }
     auth = getAuth(app);
   } catch (error) {
-    console.warn("Firebase initialization error:", error);
+    console.warn("[Firebase Guard] Initialization note:", error);
   }
 } else {
-  console.warn("Firebase configuration is incomplete. Please ensure you have added your Firebase environment variables via the AI Studio Settings menu.");
+  // Silent fallback when environment variables are not yet provided by the user
+  if (typeof window !== 'undefined' && process.env.NODE_ENV !== 'production') {
+    console.info("[Firebase Notice] Firebase environment variables not configured. The app will run smoothly in local fallback mode.");
+  }
 }
 
 export { app, db, auth };
