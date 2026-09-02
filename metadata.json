@@ -1,6 +1,6 @@
 {
-  "name": "Civil Engineering Club",
-  "description": "Club website platform for Civil Engineering Club",
+  "name": "Civil Engineering Club - HSTU",
+  "description": "Official website of Civil Engineering Club (CEC) at Hajee Mohammad Danesh Science and Technology University (HSTU), Dinajpur, Bangladesh. Executive committee, alumni network, technical events, notice board, and membership verification.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

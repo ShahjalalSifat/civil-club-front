@@ -91,8 +91,7 @@ export default function Home() {
 
   useEffect(() => {
     async function loadData() {
-      const b = await getLatestBlogs(3);
-      const e = await getUpcomingEvents(3);
+      const [b, e] = await Promise.all([getLatestBlogs(3), getUpcomingEvents(3)]);
       setBlogs(b);
       setUpcomingEvents(e);
     }

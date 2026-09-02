@@ -1,5 +1,6 @@
-import { collection, doc, getDoc, getDocs, query, orderBy, limit, where, onSnapshot } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, query, orderBy, limit, where } from 'firebase/firestore';
 import { db } from './firebase';
+import { fetchWithCache, invalidateCache } from './cache';
 
 export interface BlogPost {
   id: string;
@@ -36,32 +37,19 @@ export function extractTextContent(val: any): string {
   if (typeof val === 'number' || typeof val === 'boolean') return String(val);
   
   if (typeof val === 'object') {
-    // If it's a Tiptap / ProseMirror Document node
     if (val.type === 'doc' && Array.isArray(val.content)) {
       return renderTiptapNodes(val.content).trim();
     }
     
-    // If it's an array of nodes
     if (Array.isArray(val)) {
       return val.map((item) => extractTextContent(item)).filter(Boolean).join('\n\n');
     }
 
-    // Single node object
-    if (val.content) {
-      return extractTextContent(val.content);
-    }
-    if (val.text) {
-      return String(val.text);
-    }
-    if (val.value) {
-      return extractTextContent(val.value);
-    }
-    if (val.html) {
-      return String(val.html);
-    }
-    if (val.markdown) {
-      return String(val.markdown);
-    }
+    if (val.content) return extractTextContent(val.content);
+    if (val.text) return String(val.text);
+    if (val.value) return extractTextContent(val.value);
+    if (val.html) return String(val.html);
+    if (val.markdown) return String(val.markdown);
 
     try {
       return JSON.stringify(val);
@@ -82,7 +70,6 @@ function renderTiptapNodes(nodes: any[]): string {
       const nodeType = node.type || '';
       const contentNodes = Array.isArray(node.content) ? node.content : [];
 
-      // Extract inline text with basic formatting
       const textFromContent = contentNodes
         .map((child: any) => {
           if (!child) return '';
@@ -182,7 +169,6 @@ export function normalizeBlog(docId: string, raw: any): BlogPost {
     || data.featuredImage 
     || '';
 
-  // Extract clean plain text for excerpt
   let plainExcerpt = data.excerpt || data.summary || data.shortDescription || '';
   if (!plainExcerpt && contentText) {
     plainExcerpt = contentText
@@ -194,7 +180,6 @@ export function normalizeBlog(docId: string, raw: any): BlogPost {
     if (contentText.length > 180) plainExcerpt += '...';
   }
 
-  // Tags extraction
   let tagList: string[] = [];
   if (Array.isArray(data.tags)) {
     tagList = data.tags.filter(Boolean).map((t: any) => String(t).trim());
@@ -206,7 +191,6 @@ export function normalizeBlog(docId: string, raw: any): BlogPost {
     tagList = [data.category.trim()];
   }
 
-  // Calculate read time if not provided
   const wordCount = contentText ? contentText.split(/\s+/).length : 0;
   const estimatedReadTime = data.readTimeMinutes || data.readTime || data.readingTime || Math.max(1, Math.ceil(wordCount / 200));
 
@@ -243,43 +227,43 @@ export function normalizeBlog(docId: string, raw: any): BlogPost {
   };
 }
 
-export const BLOG_COLLECTIONS = ['blog', 'blogs', 'posts', 'articles', 'content_blog', 'blog_posts', 'site_blogs'];
+export const BLOG_COLLECTIONS = ['blog', 'blogs', 'posts', 'articles', 'content_blog', 'blog_posts'];
 
 export async function getAllBlogs(): Promise<BlogPost[]> {
   if (!db) return [];
-  const allPostsMap = new Map<string, BlogPost>();
+  return fetchWithCache('all_blogs', async () => {
+    const allPostsMap = new Map<string, BlogPost>();
 
-  for (const colName of BLOG_COLLECTIONS) {
-    try {
-      const snap = await getDocs(collection(db, colName));
-
-      if (snap && !snap.empty) {
-        snap.docs.forEach((d) => {
-          const raw = d.data();
-          const normalized = normalizeBlog(d.id, raw);
-          
-          // Show published posts or posts without explicit draft/archived status
-          const isDraft = normalized.status === 'draft' || normalized.status === 'archived' || raw.isPublished === false;
-          if (!isDraft) {
-            allPostsMap.set(d.id, normalized);
-          }
-        });
+    const promises = BLOG_COLLECTIONS.map(async (colName) => {
+      try {
+        const snap = await getDocs(collection(db!, colName));
+        if (snap && !snap.empty) {
+          snap.docs.forEach((d) => {
+            const raw = d.data();
+            const normalized = normalizeBlog(d.id, raw);
+            const isDraft = normalized.status === 'draft' || normalized.status === 'archived' || raw.isPublished === false;
+            if (!isDraft) {
+              allPostsMap.set(d.id, normalized);
+            }
+          });
+        }
+      } catch (e) {
+        // collection might not exist
       }
-    } catch (e) {
-      console.warn(`Querying collection ${colName} failed:`, e);
-    }
-  }
+    });
 
-  const posts = Array.from(allPostsMap.values());
-  // Sort descending by date, with order as tie-breaker
-  posts.sort((a, b) => {
-    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : (a.publishedAt ? new Date(a.publishedAt).getTime() : 0);
-    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : (b.publishedAt ? new Date(b.publishedAt).getTime() : 0);
-    if (timeB !== timeA) return timeB - timeA;
-    return (a.order || 0) - (b.order || 0);
-  });
+    await Promise.all(promises);
 
-  return posts;
+    const posts = Array.from(allPostsMap.values());
+    posts.sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : (a.publishedAt ? new Date(a.publishedAt).getTime() : 0);
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : (b.publishedAt ? new Date(b.publishedAt).getTime() : 0);
+      if (timeB !== timeA) return timeB - timeA;
+      return (a.order || 0) - (b.order || 0);
+    });
+
+    return posts;
+  }, 2 * 60 * 1000); // 2 mins cache
 }
 
 export async function getLatestBlogs(count = 3): Promise<BlogPost[]> {
@@ -291,48 +275,30 @@ export async function getBlogById(idOrSlug: string): Promise<BlogPost | null> {
   if (!db || !idOrSlug) return null;
   const cleanKey = decodeURIComponent(idOrSlug).trim();
 
-  for (const colName of BLOG_COLLECTIONS) {
-    try {
-      // 1. Direct document lookup by doc ID
+  return fetchWithCache(`blog_post_${cleanKey}`, async () => {
+    // Check cached list first for instant resolution
+    const all = await getAllBlogs();
+    const found = all.find((p) => 
+      p.id === cleanKey || 
+      p.slug === cleanKey || 
+      p.slug?.toLowerCase() === cleanKey.toLowerCase() ||
+      p.id.toLowerCase() === cleanKey.toLowerCase()
+    );
+    if (found) return found;
+
+    // Direct lookups in parallel across primary collections
+    for (const colName of BLOG_COLLECTIONS) {
       try {
-        const docRef = doc(db, colName, cleanKey);
+        const docRef = doc(db!, colName, cleanKey);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           return normalizeBlog(docSnap.id, docSnap.data());
         }
-      } catch {
-        // Continue to query search
-      }
-
-      // 2. Query by slug
-      const bySlugQuery = query(collection(db, colName), where('slug', '==', cleanKey));
-      const slugSnap = await getDocs(bySlugQuery);
-      if (!slugSnap.empty) {
-        const d = slugSnap.docs[0];
-        return normalizeBlog(d.id, d.data());
-      }
-
-      // 3. Query by id field
-      const byIdQuery = query(collection(db, colName), where('id', '==', cleanKey));
-      const idSnap = await getDocs(byIdQuery);
-      if (!idSnap.empty) {
-        const d = idSnap.docs[0];
-        return normalizeBlog(d.id, d.data());
-      }
-    } catch (e) {
-      console.warn(`Error finding blog in ${colName}:`, e);
+      } catch {}
     }
-  }
 
-  // Fallback: search all in memory in case of slug/id variations
-  const all = await getAllBlogs();
-  const found = all.find((p) => 
-    p.id === cleanKey || 
-    p.slug === cleanKey || 
-    p.slug?.toLowerCase() === cleanKey.toLowerCase() ||
-    p.id.toLowerCase() === cleanKey.toLowerCase()
-  );
-  return found || null;
+    return null;
+  }, 3 * 60 * 1000);
 }
 
 export interface EventItem {
@@ -379,69 +345,64 @@ export function normalizeEvent(docId: string, raw: any): EventItem {
 
 export async function getUpcomingEvents(count = 20): Promise<EventItem[]> {
   if (!db) return [];
-  const today = new Date().toISOString().split('T')[0];
-  const collectionsToTry = ['event_logs', 'events', 'upcoming_events'];
-  const eventMap = new Map<string, EventItem>();
+  return fetchWithCache('upcoming_events', async () => {
+    const today = new Date().toISOString().split('T')[0];
+    const collectionsToTry = ['event_logs', 'events', 'upcoming_events'];
+    const eventMap = new Map<string, EventItem>();
 
-  for (const colName of collectionsToTry) {
-    try {
-      const snap = await getDocs(collection(db, colName));
-      if (snap && !snap.empty) {
-        snap.docs.forEach((doc) => {
-          const item = normalizeEvent(doc.id, doc.data());
-          if (item.status !== 'draft' && item.status !== 'archived') {
-            if (item.eventDate >= today || !item.eventDate) {
-              eventMap.set(doc.id, item);
+    const promises = collectionsToTry.map(async (colName) => {
+      try {
+        const snap = await getDocs(collection(db!, colName));
+        if (snap && !snap.empty) {
+          snap.docs.forEach((doc) => {
+            const item = normalizeEvent(doc.id, doc.data());
+            if (item.status !== 'draft' && item.status !== 'archived') {
+              if (item.eventDate >= today || !item.eventDate) {
+                eventMap.set(doc.id, item);
+              }
             }
-          }
-        });
-      }
-    } catch (e) {
-      console.warn(`Querying upcoming events from ${colName} failed:`, e);
-    }
-  }
+          });
+        }
+      } catch {}
+    });
 
-  const events = Array.from(eventMap.values());
-  // Sort ascending by event date (soonest first)
-  events.sort((a, b) => {
-    return (a.eventDate || '').localeCompare(b.eventDate || '');
-  });
+    await Promise.all(promises);
 
-  return events.slice(0, count);
+    const events = Array.from(eventMap.values());
+    events.sort((a, b) => (a.eventDate || '').localeCompare(b.eventDate || ''));
+    return events;
+  }, 2 * 60 * 1000).then((res) => res.slice(0, count));
 }
 
 export async function getArchivedEvents(count = 50): Promise<EventItem[]> {
   if (!db) return [];
-  const today = new Date().toISOString().split('T')[0];
-  const collectionsToTry = ['event_logs', 'events', 'events_archive', 'archived_events'];
-  const eventMap = new Map<string, EventItem>();
+  return fetchWithCache('archived_events', async () => {
+    const today = new Date().toISOString().split('T')[0];
+    const collectionsToTry = ['event_logs', 'events', 'events_archive', 'archived_events'];
+    const eventMap = new Map<string, EventItem>();
 
-  for (const colName of collectionsToTry) {
-    try {
-      const snap = await getDocs(collection(db, colName));
-      if (snap && !snap.empty) {
-        snap.docs.forEach((doc) => {
-          const item = normalizeEvent(doc.id, doc.data());
-          if (item.status !== 'draft') {
-            // If date is before today, or marked as completed/archived
-            if ((item.eventDate && item.eventDate < today) || item.status === 'archived' || item.status === 'past') {
-              eventMap.set(doc.id, item);
+    const promises = collectionsToTry.map(async (colName) => {
+      try {
+        const snap = await getDocs(collection(db!, colName));
+        if (snap && !snap.empty) {
+          snap.docs.forEach((doc) => {
+            const item = normalizeEvent(doc.id, doc.data());
+            if (item.status !== 'draft') {
+              if ((item.eventDate && item.eventDate < today) || item.status === 'archived' || item.status === 'past') {
+                eventMap.set(doc.id, item);
+              }
             }
-          }
-        });
-      }
-    } catch (e) {
-      console.warn(`Querying archived events from ${colName} failed:`, e);
-    }
-  }
+          });
+        }
+      } catch {}
+    });
 
-  const events = Array.from(eventMap.values());
-  // Sort descending by event date (most recent past event first)
-  events.sort((a, b) => {
-    return (b.eventDate || '').localeCompare(a.eventDate || '');
-  });
+    await Promise.all(promises);
 
-  return events.slice(0, count);
+    const events = Array.from(eventMap.values());
+    events.sort((a, b) => (b.eventDate || '').localeCompare(a.eventDate || ''));
+    return events;
+  }, 2 * 60 * 1000).then((res) => res.slice(0, count));
 }
 
 // Running Batch Configuration
@@ -461,7 +422,6 @@ export function extractBatchNumber(doc: any): number | null {
     }
   }
 
-  // Also check student ID (e.g. 1602001 -> 16)
   const studentId = String(doc.studentId || doc.sid || '');
   if (studentId.length >= 2) {
     const firstTwo = parseInt(studentId.substring(0, 2), 10);
@@ -470,7 +430,6 @@ export function extractBatchNumber(doc: any): number | null {
     }
   }
 
-  // Also check session (e.g. 2016-17 -> 16)
   const session = String(doc.session || '');
   const sessionMatch = session.match(/20(\d{2})/);
   if (sessionMatch) {
@@ -481,7 +440,6 @@ export function extractBatchNumber(doc: any): number | null {
   return null;
 }
 
-// Helper detection functions for Committee & Member categories
 export function isAdvisoryMember(doc: any): boolean {
   if (!doc) return false;
   const t = String(doc.type || '').toLowerCase();
@@ -525,11 +483,8 @@ export function isTaskforceMember(doc: any): boolean {
 
 export function isAlumniMember(doc: any): boolean {
   if (!doc) return false;
-
-  // Advisory members are not student alumni in this context
   if (isAdvisoryMember(doc)) return false;
 
-  // Check Batch Number: Batches <= 19 (e.g. Batch 16, 17, 18) are graduated Alumni
   const batchNum = extractBatchNumber(doc);
   if (batchNum !== null && batchNum < RUNNING_BATCH_MIN) {
     return true;
@@ -541,7 +496,6 @@ export function isAlumniMember(doc: any): boolean {
   const d = String(doc.designation || doc.position || '').toLowerCase();
   const s = String(doc.status || '').toLowerCase();
 
-  // Flag checks
   if (
     doc.isAlumni === true ||
     doc.isGraduated === true ||
@@ -554,7 +508,6 @@ export function isAlumniMember(doc: any): boolean {
     return true;
   }
 
-  // String keyword checks
   return (
     t.includes('alumni') ||
     c.includes('alumni') ||
@@ -575,20 +528,14 @@ export function isAlumniMember(doc: any): boolean {
 
 export function isExecutiveMember(doc: any): boolean {
   if (!doc) return false;
-
-  // 1. Advisors & Mentors are strictly NOT executive student committee
   if (isAdvisoryMember(doc)) return false;
-
-  // 2. Non-running / graduated / former / alumni members (e.g. Batch 16 or < 20) are strictly NOT current executive committee
   if (isAlumniMember(doc)) return false;
 
-  // 3. Check Batch: Running student batches must be >= RUNNING_BATCH_MIN (Batch 20+)
   const batchNum = extractBatchNumber(doc);
   if (batchNum !== null && batchNum < RUNNING_BATCH_MIN) {
     return false;
   }
 
-  // 4. Taskforce members have their own category
   if (isTaskforceMember(doc)) return false;
 
   const t = String(doc.type || '').toLowerCase();
@@ -598,7 +545,6 @@ export function isExecutiveMember(doc: any): boolean {
   const d = String(doc.designation || doc.position || '').toLowerCase();
   const s = String(doc.status || '').toLowerCase();
 
-  // Check for explicit inactive status
   if (
     s.includes('inactive') ||
     s.includes('alumni') ||
@@ -627,7 +573,6 @@ export function isExecutiveMember(doc: any): boolean {
     return true;
   }
 
-  // Executive Committee Designation Auto-Detection for RUNNING students
   const executiveKeywords = [
     'president',
     'vice president',
@@ -723,184 +668,217 @@ export function normalizeLeadershipMember(docId: string, raw: any, fallbackCateg
 export async function getAllLeadershipMembers(category?: string) {
   if (!db) return [];
   
-  const collectionsToTry = [
-    'leadership_members',
-    'leadership',
-    'executives',
-    'executive_members',
-    'committee_members',
-    'committee',
-    'advisors',
-    'alumni',
-    'taskforce',
-    'memberships',
-    'members'
-  ];
+  const cacheKey = `leadership_members_${category || 'all'}`;
 
-  const memberMap = new Map<string, any>();
+  return fetchWithCache(cacheKey, async () => {
+    const collectionsToTry = [
+      'leadership_members',
+      'leadership',
+      'executives',
+      'executive_members',
+      'committee_members',
+      'committee',
+      'advisors',
+      'alumni',
+      'taskforce',
+      'memberships',
+      'members'
+    ];
 
-  for (const colName of collectionsToTry) {
-    try {
-      let snap;
+    const memberMap = new Map<string, any>();
+
+    // Parallel query execution across collections
+    const promises = collectionsToTry.map(async (colName) => {
       try {
-        snap = await getDocs(query(collection(db, colName), orderBy('createdAt', 'desc')));
-      } catch {
-        snap = await getDocs(collection(db, colName));
-      }
+        let snap;
+        try {
+          snap = await getDocs(query(collection(db!, colName), orderBy('createdAt', 'desc'), limit(150)));
+        } catch {
+          snap = await getDocs(query(collection(db!, colName), limit(150)));
+        }
 
-      if (snap && !snap.empty) {
-        snap.docs.forEach((doc) => {
-          const raw = doc.data() as any;
-          // For general 'memberships' or 'members' collections, only include if they have a leadership/executive indicator
-          if (colName === 'memberships' || colName === 'members') {
-            const isLead = isExecutiveMember(raw) || isAdvisoryMember(raw) || isAlumniMember(raw) || isTaskforceMember(raw) || raw.type || raw.category;
-            if (!isLead) return;
-          }
+        if (snap && !snap.empty) {
+          snap.docs.forEach((doc) => {
+            const raw = doc.data() as any;
+            if (colName === 'memberships' || colName === 'members') {
+              const isLead = isExecutiveMember(raw) || isAdvisoryMember(raw) || isAlumniMember(raw) || isTaskforceMember(raw) || raw.type || raw.category;
+              if (!isLead) return;
+            }
 
-          const normalized = normalizeLeadershipMember(doc.id, raw, colName.includes('alumni') ? 'alumni' : colName.includes('advis') ? 'advisory' : colName.includes('task') ? 'taskforce' : 'executive');
-          
-          // Deduplicate by id or unique name+batch
-          const dedupeKey = `${normalized.name.toLowerCase().trim()}_${String(normalized.batch).toLowerCase().trim()}`;
-          if (!memberMap.has(doc.id) && !memberMap.has(dedupeKey)) {
-            memberMap.set(doc.id, normalized);
-            memberMap.set(dedupeKey, normalized);
-          }
-        });
+            const normalized = normalizeLeadershipMember(
+              doc.id, 
+              raw, 
+              colName.includes('alumni') ? 'alumni' : colName.includes('advis') ? 'advisory' : colName.includes('task') ? 'taskforce' : 'executive'
+            );
+            
+            const dedupeKey = `${normalized.name.toLowerCase().trim()}_${String(normalized.batch).toLowerCase().trim()}`;
+            if (!memberMap.has(doc.id) && !memberMap.has(dedupeKey)) {
+              memberMap.set(doc.id, normalized);
+              memberMap.set(dedupeKey, normalized);
+            }
+          });
+        }
+      } catch (e) {
+        // collection missing
       }
-    } catch (e) {
-      console.warn(`Querying leadership collection ${colName} note:`, e);
+    });
+
+    await Promise.all(promises);
+
+    const allUnique = Array.from(new Set(memberMap.values()));
+
+    if (!category) {
+      return allUnique;
     }
-  }
 
-  // Get unique list of members
-  const allUnique = Array.from(new Set(memberMap.values()));
+    const targetCategory = category.toLowerCase().trim();
 
-  if (!category) {
-    return allUnique;
-  }
+    if (targetCategory === 'executive' || targetCategory === 'executive_committee') {
+      return allUnique.filter((m) => isExecutiveMember(m) && !isAlumniMember(m) && !isAdvisoryMember(m));
+    }
 
-  const targetCategory = category.toLowerCase().trim();
+    if (targetCategory === 'alumni') {
+      return allUnique.filter((m) => isAlumniMember(m) && !isAdvisoryMember(m));
+    }
 
-  if (targetCategory === 'executive' || targetCategory === 'executive_committee') {
-    return allUnique.filter((m) => isExecutiveMember(m) && !isAlumniMember(m) && !isAdvisoryMember(m));
-  }
+    if (targetCategory === 'advisory' || targetCategory === 'advisor') {
+      return allUnique.filter((m) => isAdvisoryMember(m));
+    }
 
-  if (targetCategory === 'alumni') {
-    return allUnique.filter((m) => isAlumniMember(m) && !isAdvisoryMember(m));
-  }
+    if (targetCategory === 'taskforce') {
+      return allUnique.filter((m) => isTaskforceMember(m));
+    }
 
-  if (targetCategory === 'advisory' || targetCategory === 'advisor') {
-    return allUnique.filter((m) => isAdvisoryMember(m));
-  }
-
-  if (targetCategory === 'taskforce') {
-    return allUnique.filter((m) => isTaskforceMember(m));
-  }
-
-  return allUnique.filter((m) => 
-    (m.type && m.type.toLowerCase().includes(targetCategory)) ||
-    (m.category && m.category.toLowerCase().includes(targetCategory))
-  );
+    return allUnique.filter((m) => 
+      (m.type && m.type.toLowerCase().includes(targetCategory)) ||
+      (m.category && m.category.toLowerCase().includes(targetCategory))
+    );
+  }, 3 * 60 * 1000); // 3 minutes cache
 }
 
 export async function getNotices() {
   if (!db) return [];
-  const q = query(collection(db, "notices"), orderBy("createdAt", "desc"));
-  const snap = await getDocs(q);
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  return fetchWithCache('notices_list', async () => {
+    try {
+      const q = query(collection(db!, "notices"), orderBy("createdAt", "desc"), limit(50));
+      const snap = await getDocs(q);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } catch {
+      const snap = await getDocs(collection(db!, "notices"));
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+  }, 2 * 60 * 1000);
 }
 
 export async function getMagazines() {
   if (!db) return [];
-  const q = query(collection(db, "magazines"), orderBy("createdAt", "desc"));
-  const snap = await getDocs(q);
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  return fetchWithCache('magazines_list', async () => {
+    try {
+      const q = query(collection(db!, "magazines"), orderBy("createdAt", "desc"), limit(50));
+      const snap = await getDocs(q);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } catch {
+      const snap = await getDocs(collection(db!, "magazines"));
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+  }, 5 * 60 * 1000);
 }
 
 export async function getResources() {
   if (!db) return [];
-  const q = query(collection(db, "resources"), orderBy("createdAt", "desc"));
-  const snap = await getDocs(q);
-  return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+  return fetchWithCache('resources_list', async () => {
+    try {
+      const q = query(collection(db!, "resources"), orderBy("createdAt", "desc"), limit(100));
+      const snap = await getDocs(q);
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    } catch {
+      const snap = await getDocs(collection(db!, "resources"));
+      return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    }
+  }, 5 * 60 * 1000);
 }
 
 export async function getFaqs() {
   if (!db) return [];
-  const collectionsToTry = ['faqs', 'faq', 'frequently_asked_questions', 'site_faqs', 'questions'];
-  const faqMap = new Map<string, any>();
+  return fetchWithCache('faqs_list', async () => {
+    const collectionsToTry = ['faqs', 'faq', 'frequently_asked_questions', 'site_faqs', 'questions'];
+    const faqMap = new Map<string, any>();
 
-  for (const colName of collectionsToTry) {
-    try {
-      let snap;
+    const promises = collectionsToTry.map(async (colName) => {
       try {
-        snap = await getDocs(query(collection(db, colName), orderBy('createdAt', 'desc')));
-      } catch {
-        snap = await getDocs(collection(db, colName));
+        let snap;
+        try {
+          snap = await getDocs(query(collection(db!, colName), orderBy('createdAt', 'desc')));
+        } catch {
+          snap = await getDocs(collection(db!, colName));
+        }
+
+        if (snap && !snap.empty) {
+          snap.docs.forEach((doc) => {
+            const raw = doc.data() as any;
+            if (raw.status !== 'draft' && raw.status !== 'archived') {
+              const title = raw.question || raw.title || raw.heading || raw.q || 'Frequently Asked Question';
+              const rawAnswer = raw.answer || raw.description || raw.bodyRichText || raw.content || raw.ans || raw.a || '';
+              const answer = extractTextContent(rawAnswer);
+              faqMap.set(doc.id, {
+                id: doc.id,
+                ...raw,
+                title,
+                question: title,
+                description: answer,
+                answer: answer,
+                category: raw.category || 'General',
+                order: typeof raw.order === 'number' ? raw.order : 0,
+              });
+            }
+          });
+        }
+      } catch {}
+    });
+
+    await Promise.all(promises);
+
+    const list = Array.from(faqMap.values());
+    list.sort((a, b) => {
+      if (a.order !== undefined && b.order !== undefined && a.order !== b.order) {
+        return a.order - b.order;
       }
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeB - timeA;
+    });
 
-      if (snap && !snap.empty) {
-        snap.docs.forEach((doc) => {
-          const raw = doc.data() as any;
-          if (raw.status !== 'draft' && raw.status !== 'archived') {
-            const title = raw.question || raw.title || raw.heading || raw.q || 'Frequently Asked Question';
-            const rawAnswer = raw.answer || raw.description || raw.bodyRichText || raw.content || raw.ans || raw.a || '';
-            const answer = extractTextContent(rawAnswer);
-            faqMap.set(doc.id, {
-              id: doc.id,
-              ...raw,
-              title,
-              question: title,
-              description: answer,
-              answer: answer,
-              category: raw.category || 'General',
-              order: typeof raw.order === 'number' ? raw.order : 0,
-            });
-          }
-        });
-      }
-    } catch (e) {
-      console.warn(`Querying FAQ collection ${colName} failed:`, e);
-    }
-  }
-
-  const list = Array.from(faqMap.values());
-  list.sort((a, b) => {
-    if (a.order !== undefined && b.order !== undefined && a.order !== b.order) {
-      return a.order - b.order;
-    }
-    const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-    const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-    return timeB - timeA;
-  });
-
-  return list;
+    return list;
+  }, 5 * 60 * 1000);
 }
 
 export async function getGalleries() {
   if (!db) return [];
-  const collectionsToTry = ['gallery_items', 'gallery', 'galleries', 'photos', 'site_gallery'];
-  const map = new Map<string, any>();
+  return fetchWithCache('galleries_list', async () => {
+    const collectionsToTry = ['gallery_items', 'gallery', 'galleries', 'photos', 'site_gallery'];
+    const map = new Map<string, any>();
 
-  for (const colName of collectionsToTry) {
-    try {
-      let snap;
+    const promises = collectionsToTry.map(async (colName) => {
       try {
-        snap = await getDocs(query(collection(db, colName), orderBy('createdAt', 'desc')));
-      } catch {
-        snap = await getDocs(collection(db, colName));
-      }
+        let snap;
+        try {
+          snap = await getDocs(query(collection(db!, colName), orderBy('createdAt', 'desc'), limit(100)));
+        } catch {
+          snap = await getDocs(collection(db!, colName));
+        }
 
-      if (snap && !snap.empty) {
-        snap.docs.forEach((doc) => {
-          map.set(doc.id, { id: doc.id, ...doc.data() });
-        });
-      }
-    } catch (e) {
-      console.warn(`Querying gallery collection ${colName} failed:`, e);
-    }
-  }
+        if (snap && !snap.empty) {
+          snap.docs.forEach((doc) => {
+            map.set(doc.id, { id: doc.id, ...doc.data() });
+          });
+        }
+      } catch {}
+    });
 
-  return Array.from(map.values());
+    await Promise.all(promises);
+
+    return Array.from(map.values());
+  }, 3 * 60 * 1000);
 }
 
 export interface MembershipRecord {
@@ -932,201 +910,184 @@ export async function getMembership(queryStr: string): Promise<MembershipRecord 
   const cleanQuery = queryStr.trim();
   const lowerQuery = cleanQuery.toLowerCase();
 
-  const collectionsToTry = [
-    "memberships",
-    "members",
-    "leadership_members",
-    "executives",
-    "executive_members",
-    "committee_members",
-    "leadership",
-    "alumni",
-    "advisors"
-  ];
+  return fetchWithCache(`membership_search_${lowerQuery}`, async () => {
+    const collectionsToTry = [
+      "memberships",
+      "members",
+      "leadership_members",
+      "executives",
+      "executive_members",
+      "committee_members",
+      "leadership",
+      "alumni",
+      "advisors"
+    ];
 
-  // Helper to format a matched doc into MembershipRecord
-  const formatRecord = (docId: string, raw: any): MembershipRecord => {
-    const isExec = isExecutiveMember(raw);
-    const fullName = raw.fullName || raw.name || raw.memberName || 'Club Member';
-    const photoUrl = raw.photoUrl || raw.photo || raw.imageUrl || raw.avatar || `https://picsum.photos/seed/${encodeURIComponent(docId)}/400/400`;
-    const batch = raw.batch !== undefined && raw.batch !== null ? raw.batch : (raw.batchNo || '');
-    const department = raw.department || raw.dept || 'Civil Engineering';
-    const facebookUrl = raw.facebookUrl || raw.facebook || '';
-    const linkedinUrl = raw.linkedinUrl || raw.linkedin || '';
-    const email = raw.emailAddress || raw.email || '';
-    const phone = raw.phone || raw.contact || raw.contactNo || '';
-    const membershipId = raw.membershipId || raw.memberId || raw.id || (docId.startsWith('MEM') || docId.startsWith('CEC') ? docId : `CEC-${docId.substring(0, 8).toUpperCase()}`);
-    const designation = raw.designation || raw.role || raw.position || (isExec ? 'Executive Committee Member' : 'Member');
-    const role = raw.role || designation || (isExec ? 'Executive Committee' : 'General Member');
-    const status = raw.status || (isExec ? 'Active (Executive Committee)' : 'Active Member');
-    const bloodGroup = raw.bloodGroup || raw.blood || '';
-    const issueDate = raw.issueDate || raw.joinedDate || (raw.createdAt ? new Date(raw.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Active Member');
+    const formatRecord = (docId: string, raw: any): MembershipRecord => {
+      const isExec = isExecutiveMember(raw);
+      const fullName = raw.fullName || raw.name || raw.memberName || 'Club Member';
+      const photoUrl = raw.photoUrl || raw.photo || raw.imageUrl || raw.avatar || `https://picsum.photos/seed/${encodeURIComponent(docId)}/400/400`;
+      const batch = raw.batch !== undefined && raw.batch !== null ? raw.batch : (raw.batchNo || '');
+      const department = raw.department || raw.dept || 'Civil Engineering';
+      const facebookUrl = raw.facebookUrl || raw.facebook || '';
+      const linkedinUrl = raw.linkedinUrl || raw.linkedin || '';
+      const email = raw.emailAddress || raw.email || '';
+      const phone = raw.phone || raw.contact || raw.contactNo || '';
+      const membershipId = raw.membershipId || raw.memberId || raw.id || (docId.startsWith('MEM') || docId.startsWith('CEC') ? docId : `CEC-${docId.substring(0, 8).toUpperCase()}`);
+      const designation = raw.designation || raw.role || raw.position || (isExec ? 'Executive Committee Member' : 'Member');
+      const role = raw.role || designation || (isExec ? 'Executive Committee' : 'General Member');
+      const status = raw.status || (isExec ? 'Active (Executive Committee)' : 'Active Member');
+      const bloodGroup = raw.bloodGroup || raw.blood || '';
+      const issueDate = raw.issueDate || raw.joinedDate || (raw.createdAt ? new Date(raw.createdAt).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Active Member');
 
-    return {
-      id: docId,
-      ...raw,
-      membershipId,
-      fullName,
-      name: fullName,
-      designation,
-      role,
-      batch,
-      department,
-      photoUrl,
-      facebookUrl,
-      linkedinUrl,
-      email,
-      phone,
-      status,
-      bloodGroup,
-      issueDate,
-      isExecutive: isExec,
+      return {
+        id: docId,
+        ...raw,
+        membershipId,
+        fullName,
+        name: fullName,
+        designation,
+        role,
+        batch,
+        department,
+        photoUrl,
+        facebookUrl,
+        linkedinUrl,
+        email,
+        phone,
+        status,
+        bloodGroup,
+        issueDate,
+        isExecutive: isExec,
+      };
     };
-  };
 
-  // Phase 1: Fast exact indexed queries
-  for (const colName of collectionsToTry) {
-    try {
-      // 1. By membershipId
-      let q = query(collection(db, colName), where("membershipId", "==", cleanQuery));
-      let snap = await getDocs(q);
+    // Fast indexed parallel lookup
+    const lookupPromises = collectionsToTry.map(async (colName) => {
+      try {
+        const idSnap = await getDocs(query(collection(db!, colName), where("membershipId", "==", cleanQuery), limit(1)));
+        if (!idSnap.empty) return formatRecord(idSnap.docs[0].id, idSnap.docs[0].data());
 
-      // 2. By studentId
-      if (snap.empty) {
-        q = query(collection(db, colName), where("studentId", "==", cleanQuery));
-        snap = await getDocs(q);
-      }
+        const sidSnap = await getDocs(query(collection(db!, colName), where("studentId", "==", cleanQuery), limit(1)));
+        if (!sidSnap.empty) return formatRecord(sidSnap.docs[0].id, sidSnap.docs[0].data());
 
-      // 3. By email / emailAddress
-      if (snap.empty) {
-        q = query(collection(db, colName), where("email", "==", cleanQuery));
-        snap = await getDocs(q);
-      }
-      if (snap.empty) {
-        q = query(collection(db, colName), where("emailAddress", "==", cleanQuery));
-        snap = await getDocs(q);
-      }
+        const emSnap = await getDocs(query(collection(db!, colName), where("email", "==", cleanQuery), limit(1)));
+        if (!emSnap.empty) return formatRecord(emSnap.docs[0].id, emSnap.docs[0].data());
 
-      // 4. By name / fullName
-      if (snap.empty) {
-        q = query(collection(db, colName), where("name", "==", cleanQuery));
-        snap = await getDocs(q);
-      }
-      if (snap.empty) {
-        q = query(collection(db, colName), where("fullName", "==", cleanQuery));
-        snap = await getDocs(q);
-      }
-
-      // 5. By document ID
-      if (snap.empty) {
         try {
-          const directDoc = await getDoc(doc(db, colName, cleanQuery));
-          if (directDoc.exists()) {
-            return formatRecord(directDoc.id, directDoc.data());
-          }
-        } catch {
-          // ignore
-        }
-      }
+          const directDoc = await getDoc(doc(db!, colName, cleanQuery));
+          if (directDoc.exists()) return formatRecord(directDoc.id, directDoc.data());
+        } catch {}
+      } catch {}
+      return null;
+    });
 
-      if (!snap.empty) {
-        return formatRecord(snap.docs[0].id, snap.docs[0].data());
-      }
-    } catch (err) {
-      console.warn(`Direct query on ${colName} note:`, err);
-    }
-  }
+    const results = await Promise.all(lookupPromises);
+    const directHit = results.find(Boolean);
+    if (directHit) return directHit;
 
-  // Phase 2: In-Memory Case-Insensitive and Substring Deep Search (guarantees finding executive & general members)
-  for (const colName of collectionsToTry) {
-    try {
-      const snap = await getDocs(collection(db, colName));
-      if (!snap.empty) {
-        for (const d of snap.docs) {
-          const raw = d.data() as any;
-          const mId = String(raw.membershipId || raw.memberId || d.id || '').toLowerCase();
-          const sId = String(raw.studentId || raw.sid || '').toLowerCase();
-          const em = String(raw.email || raw.emailAddress || '').toLowerCase();
-          const nm = String(raw.name || raw.fullName || raw.memberName || '').toLowerCase();
-          const ph = String(raw.phone || raw.contact || raw.contactNo || '').replace(/\D/g, '');
-          const cleanPhone = cleanQuery.replace(/\D/g, '');
+    // Deep in-memory search across primary collections in parallel
+    const deepPromises = collectionsToTry.map(async (colName) => {
+      try {
+        const snap = await getDocs(query(collection(db!, colName), limit(150)));
+        if (!snap.empty) {
+          for (const d of snap.docs) {
+            const raw = d.data() as any;
+            const mId = String(raw.membershipId || raw.memberId || d.id || '').toLowerCase();
+            const sId = String(raw.studentId || raw.sid || '').toLowerCase();
+            const em = String(raw.email || raw.emailAddress || '').toLowerCase();
+            const nm = String(raw.name || raw.fullName || raw.memberName || '').toLowerCase();
+            const ph = String(raw.phone || raw.contact || raw.contactNo || '').replace(/\D/g, '');
+            const cleanPhone = cleanQuery.replace(/\D/g, '');
 
-          if (
-            mId === lowerQuery ||
-            mId.includes(lowerQuery) ||
-            sId === lowerQuery ||
-            sId.includes(lowerQuery) ||
-            em === lowerQuery ||
-            nm === lowerQuery ||
-            nm.includes(lowerQuery) ||
-            (cleanPhone && ph && ph.includes(cleanPhone)) ||
-            d.id.toLowerCase() === lowerQuery
-          ) {
-            return formatRecord(d.id, raw);
+            if (
+              mId === lowerQuery ||
+              mId.includes(lowerQuery) ||
+              sId === lowerQuery ||
+              sId.includes(lowerQuery) ||
+              em === lowerQuery ||
+              nm === lowerQuery ||
+              nm.includes(lowerQuery) ||
+              (cleanPhone && ph && ph.includes(cleanPhone)) ||
+              d.id.toLowerCase() === lowerQuery
+            ) {
+              return formatRecord(d.id, raw);
+            }
           }
         }
-      }
-    } catch (e) {
-      console.warn(`Scan on ${colName} note:`, e);
-    }
-  }
+      } catch {}
+      return null;
+    });
 
-  return null;
+    const deepResults = await Promise.all(deepPromises);
+    return deepResults.find(Boolean) || null;
+  }, 5 * 60 * 1000);
 }
 
 export async function getCertificate(certificateId: string) {
-  if (!db) return null;
-  const q = query(collection(db, "certificates"), where("certificateId", "==", certificateId));
-  const snap = await getDocs(q);
-  if (snap.empty) return null;
-  return { id: snap.docs[0].id, ...snap.docs[0].data() };
+  if (!db || !certificateId) return null;
+  return fetchWithCache(`cert_${certificateId}`, async () => {
+    try {
+      const q = query(collection(db!, "certificates"), where("certificateId", "==", certificateId), limit(1));
+      const snap = await getDocs(q);
+      if (snap.empty) return null;
+      return { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } catch {
+      return null;
+    }
+  }, 5 * 60 * 1000);
 }
 
 export async function getConstitution() {
   if (!db) return null;
-  try {
-    const q = query(collection(db, "pages_static"), where("__name__", "==", "constitution"));
-    const snap = await getDocs(q);
-    if (snap.empty) return null;
-    return { id: snap.docs[0].id, ...snap.docs[0].data() };
-  } catch (e) {
-    console.error("Failed to fetch constitution", e);
-    return null;
-  }
+  return fetchWithCache('page_constitution', async () => {
+    try {
+      const q = query(collection(db!, "pages_static"), where("__name__", "==", "constitution"));
+      const snap = await getDocs(q);
+      if (snap.empty) return null;
+      return { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } catch (e) {
+      console.error("Failed to fetch constitution", e);
+      return null;
+    }
+  }, 10 * 60 * 1000);
 }
 
 export async function getHistory() {
   if (!db) return null;
-  try {
-    const q = query(collection(db, "pages_static"), where("__name__", "==", "history"));
-    const snap = await getDocs(q);
-    if (snap.empty) return null;
-    return { id: snap.docs[0].id, ...snap.docs[0].data() };
-  } catch (e) {
-    console.error("Failed to fetch history", e);
-    return null;
-  }
+  return fetchWithCache('page_history', async () => {
+    try {
+      const q = query(collection(db!, "pages_static"), where("__name__", "==", "history"));
+      const snap = await getDocs(q);
+      if (snap.empty) return null;
+      return { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } catch (e) {
+      console.error("Failed to fetch history", e);
+      return null;
+    }
+  }, 10 * 60 * 1000);
 }
 
 export async function getLocation() {
   if (!db) return null;
-  try {
-    const qLocation = query(collection(db, "site_settings"), where("__name__", "==", "location"));
-    const snapLocation = await getDocs(qLocation);
-    const locationData = snapLocation.empty ? null : snapLocation.docs[0].data();
+  return fetchWithCache('site_location_footer', async () => {
+    try {
+      const [snapLocation, snapFooter] = await Promise.all([
+        getDocs(query(collection(db!, "site_settings"), where("__name__", "==", "location"))),
+        getDocs(query(collection(db!, "site_settings"), where("__name__", "==", "footer")))
+      ]);
+      const locationData = snapLocation.empty ? null : snapLocation.docs[0].data();
+      const footerData = snapFooter.empty ? null : snapFooter.docs[0].data();
 
-    const qFooter = query(collection(db, "site_settings"), where("__name__", "==", "footer"));
-    const snapFooter = await getDocs(qFooter);
-    const footerData = snapFooter.empty ? null : snapFooter.docs[0].data();
-
-    return { 
-        id: "location", 
-        mapIframe: locationData?.mapIframe,
-        address: footerData?.address,
-        ...locationData
-    };
-  } catch (e) {
-    console.error("Failed to fetch location", e);
-    return null;
-  }
+      return { 
+          id: "location", 
+          mapIframe: locationData?.mapIframe,
+          address: footerData?.address,
+          ...locationData
+      };
+    } catch (e) {
+      console.error("Failed to fetch location", e);
+      return null;
+    }
+  }, 10 * 60 * 1000);
 }

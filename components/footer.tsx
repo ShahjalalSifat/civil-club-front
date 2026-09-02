@@ -40,20 +40,34 @@ export function Footer() {
 
           <div className="flex flex-col gap-4">
             <h4 className="font-bold text-lg mb-2">Quick Links</h4>
-            {['Home', 'About Us', 'Gallery', 'Events', 'Contact'].map((item) => (
-              <Link key={item} href="#" className="text-primary-light/70 dark:text-primary/70 hover:text-info-light transition-colors flex items-center gap-2 group">
+            {[
+              { name: 'Home', href: '/' },
+              { name: 'Executive Committee', href: '/about/leadership/executive' },
+              { name: 'Alumni Network', href: '/about/leadership/alumni' },
+              { name: 'Upcoming Events', href: '/events/upcoming' },
+              { name: 'Notice Board', href: '/events/notice' },
+              { name: 'Contact Us', href: '/contact' },
+            ].map((item) => (
+              <Link key={item.name} href={item.href} className="text-primary-light/70 dark:text-primary/70 hover:text-info-light transition-colors flex items-center gap-2 group">
                 <span className="w-0 h-[2px] bg-info-light transition-all duration-300 group-hover:w-4"></span>
-                {item}
+                {item.name}
               </Link>
             ))}
           </div>
 
           <div className="flex flex-col gap-4">
-            <h4 className="font-bold text-lg mb-2">Resources</h4>
-            {['Constitution', 'History', 'Magazine', 'Certificate Verification', 'FAQ'].map((item) => (
-              <Link key={item} href="#" className="text-primary-light/70 dark:text-primary/70 hover:text-info-light transition-colors flex items-center gap-2 group">
+            <h4 className="font-bold text-lg mb-2">Resources & Verification</h4>
+            {[
+              { name: 'Club Constitution', href: '/about/constitution' },
+              { name: 'Our History', href: '/about/history' },
+              { name: 'Membership ID Check', href: '/verification/membership' },
+              { name: 'Certificate Verification', href: '/verification/certificate' },
+              { name: 'Academic Resources', href: '/content/resources' },
+              { name: 'Photo Gallery', href: '/content/gallery' },
+            ].map((item) => (
+              <Link key={item.name} href={item.href} className="text-primary-light/70 dark:text-primary/70 hover:text-info-light transition-colors flex items-center gap-2 group">
                 <span className="w-0 h-[2px] bg-info-light transition-all duration-300 group-hover:w-4"></span>
-                {item}
+                {item.name}
               </Link>
             ))}
           </div>
